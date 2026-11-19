@@ -1,0 +1,123 @@
+// agent-diff: check a new agent version against the current one before it ships.
+//
+// An agent has versions (model + system prompt + tools). A release check replays
+// a set of past conversations through both versions and records, per
+// conversation, the two answers and a verdict. An admin approves or blocks.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model Agent {
+  id            String         @id @default(cuid())
+  name          String
+  versions      AgentVersion[]
+  conversations Conversation[]
+  checks        ReleaseCheck[]
+  createdAt     DateTime       @default(now())
+
+  @@map("agents")
+}
+
+/// Everything that can change between releases: model, prompt, tools.
+model AgentVersion {
+  id           String   @id @default(cuid())
+  agentId      String
+  agent        Agent    @relation(fields: [agentId], references: [id])
+  label        String
+  model        String
+  systemPrompt String   @db.Text
+  /// Tool definitions offered to the model (name, description, JSON schema).
+  tools        Json
+  createdAt    DateTime @default(now())
+
+  baseChecks      ReleaseCheck[] @relation("base")
+  candidateChecks ReleaseCheck[] @relation("candidate")
+
+  @@unique([agentId, label])
+  @@map("agent_versions")
+}
+
+/// A past conversation used as a replay case. `recordedTools` holds the tool
+/// results seen in production, so a replay never calls a real system.
+model Conversation {
+  id            String       @id @default(cuid())
+  agentId       String
+  agent         Agent        @relation(fields: [agentId], references: [id])
+  title         String
+  /// The user's message(s) to replay.
+  messages      Json
+  /// toolName -> list of recorded results, keyed by arguments.
+  recordedTools Json
+  cases         ReplayCase[]
+  createdAt     DateTime     @default(now())
+
+  @@map("conversations")
+}
+
+enum CheckStatus {
+  running
+  ready
+  approved
+  blocked
+}
+
+model ReleaseCheck {
+  id                 String       @id @default(cuid())
+  agentId            String
+  agent              Agent        @relation(fields: [agentId], references: [id])
+  baseVersionId      String
+  baseVersion        AgentVersion @relation("base", fields: [baseVersionId], references: [id])
+  candidateVersionId String
+  candidateVersion   AgentVersion @relation("candidate", fields: [candidateVersionId], references: [id])
+  status             CheckStatus  @default(running)
+  /// Optional short name, e.g. what changed in the method for this run.
+  label              String?
+  decisionNote       String?      @db.Text
+  decidedAt          DateTime?
+  cases              ReplayCase[]
+  createdAt          DateTime     @default(now())
+
+  @@map("release_checks")
+}
+
+enum CaseStatus {
+  queued
+  running
+  done
+  failed
+}
+
+enum Verdict {
+  same
+  better
+  worse
+  unclear
+}
+
+model ReplayCase {
+  id              String       @id @default(cuid())
+  checkId         String
+  check           ReleaseCheck @relation(fields: [checkId], references: [id])
+  conversationId  String
+  conversation    Conversation @relation(fields: [conversationId], references: [id])
+  status          CaseStatus   @default(queued)
+  baseAnswer      String?      @db.Text
+  candidateAnswer String?      @db.Text
+  /// Every model and tool call of each replay, for the side-by-side view.
+  baseTrace       Json?
+  candidateTrace  Json?
+  verdict         Verdict?
+  reason          String?      @db.Text
+  error           String?      @db.Text
+  attempts        Int          @default(0)
+  updatedAt       DateTime     @updatedAt
+
+  @@unique([checkId, conversationId])
+  @@index([checkId, status])
+  @@map("replay_cases")
+}
